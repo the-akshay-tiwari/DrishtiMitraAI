@@ -1,0 +1,38 @@
+{
+  "model": "EfficientNet-B0 ImageNet transfer learning",
+  "dataset": "Bundled IDRiD labels and fundus images",
+  "split": {
+    "training": 300,
+    "validation": 75,
+    "held_out_test": 80
+  },
+  "best_epoch": 1,
+  "best_validation_metrics": {
+    "accuracy": 0.48,
+    "balanced_accuracy": 0.3634028580115537,
+    "macro_f1": 0.35925761608991424,
+    "quadratic_weighted_kappa": 0.680285316338159
+  },
+  "held_out_test_metrics": {
+    "accuracy": 0.375,
+    "balanced_accuracy": 0.3236559139784946,
+    "macro_f1": 0.2820912420912421,
+    "quadratic_weighted_kappa": 0.4339453649798477
+  },
+  "held_out_test_class_counts": {
+    "0": 15,
+    "1": 5,
+    "2": 31,
+    "3": 20,
+    "4": 9
+  },
+  "held_out_test_predictions": {
+    "0": 24,
+    "1": 1,
+    "2": 34,
+    "3": 8,
+    "4": 13
+  },
+  "elapsed_minutes": 2.26,
+  "medical_disclaimer": "Experimental research result. It must undergo independent external and clinical validation before any clinical use."
+}

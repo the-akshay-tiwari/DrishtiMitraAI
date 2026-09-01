@@ -1,0 +1,21 @@
+# Virtual Environments & Python Cache
+.python312/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node Modules & Frontend Builds
+node_modules/
+dist/
+.vite/
+
+# Logs & Temporary Artifacts
+*.log
+artifacts-*.log
+
+# OS & IDE Files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
