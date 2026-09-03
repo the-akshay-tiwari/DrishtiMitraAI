@@ -99,13 +99,25 @@ def resolve_device(requested: str) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def load_aptos_samples() -> tuple[list[Sample], list[Sample], list[Sample]]:
-    """Load APTOS 2019 dataset pre-split into train (2930), validation (366), and test (366) sets."""
-    train_dir = APTOS_DIR / "train_images" / "train_images"
-    val_dir = APTOS_DIR / "val_images" / "val_images"
-    test_dir = APTOS_DIR / "test_images" / "test_images"
+def resolve_aptos_image_path(split_prefix: str, id_code: str) -> Path | None:
+    """Robustly resolve image path across flat or nested folder extraction structures."""
+    candidates = [
+        APTOS_DIR / f"{split_prefix}_images" / f"{id_code}.png",
+        APTOS_DIR / f"{split_prefix}_images" / f"{id_code}.jpg",
+        APTOS_DIR / f"{split_prefix}_images" / f"{split_prefix}_images" / f"{id_code}.png",
+        APTOS_DIR / f"{split_prefix}_images" / f"{split_prefix}_images" / f"{id_code}.jpg",
+        APTOS_DIR / f"{id_code}.png",
+        APTOS_DIR / f"{id_code}.jpg",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
 
-    def read_csv_samples(csv_path: Path, img_dir: Path) -> list[Sample]:
+
+def load_aptos_samples() -> tuple[list[Sample], list[Sample], list[Sample]]:
+    """Load APTOS 2019 dataset, supporting flat/nested folder structures and labeled/unlabeled test sets."""
+    def read_csv_samples(csv_path: Path, split_prefix: str, require_diagnosis: bool = True) -> list[Sample]:
         samples: list[Sample] = []
         if not csv_path.is_file():
             return samples
@@ -113,20 +125,28 @@ def load_aptos_samples() -> tuple[list[Sample], list[Sample], list[Sample]]:
             for row in csv.DictReader(f):
                 image_id = (row.get("id_code") or "").strip()
                 grade_text = (row.get("diagnosis") or "").strip()
-                if not image_id or grade_text not in {"0", "1", "2", "3", "4"}:
+                if not image_id:
                     continue
-                img_path = img_dir / f"{image_id}.png"
-                if not img_path.is_file():
-                    img_path = img_dir / f"{image_id}.jpg"
-                if not img_path.is_file():
+                if require_diagnosis and grade_text not in {"0", "1", "2", "3", "4"}:
                     continue
-                samples.append(Sample(image_path=img_path, grade=int(grade_text)))
+                img_path = resolve_aptos_image_path(split_prefix, image_id)
+                if img_path is None:
+                    continue
+                grade_val = int(grade_text) if grade_text in {"0", "1", "2", "3", "4"} else -1
+                samples.append(Sample(image_path=img_path, grade=grade_val))
         return samples
 
-    train_samples = read_csv_samples(APTOS_DIR / "train_1.csv", train_dir)
-    val_samples = read_csv_samples(APTOS_DIR / "valid.csv", val_dir)
-    test_samples = read_csv_samples(APTOS_DIR / "test.csv", test_dir)
-    return train_samples, val_samples, test_samples
+    train_samples = read_csv_samples(APTOS_DIR / "train_1.csv", "train", require_diagnosis=True)
+    val_samples = read_csv_samples(APTOS_DIR / "valid.csv", "val", require_diagnosis=True)
+    test_samples = read_csv_samples(APTOS_DIR / "test.csv", "test", require_diagnosis=False)
+
+    # Filter labeled test samples for ground-truth evaluation
+    labeled_test_samples = [s for s in test_samples if s.grade >= 0]
+
+    # If test.csv is unlabeled, fallback to validation set for ground-truth test metrics
+    eval_test_samples = labeled_test_samples if len(labeled_test_samples) > 0 else val_samples
+    return train_samples, val_samples, eval_test_samples
+
 
 
 def load_idrid_samples() -> tuple[list[Sample], list[Sample]]:
