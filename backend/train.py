@@ -35,9 +35,10 @@ from torchvision.transforms import v2
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATASET_DIR = PROJECT_ROOT / "archive" / "Imagenes" / "Imagenes"
 LABELS_PATH = PROJECT_ROOT / "archive" / "idrid_labels.csv"
+APTOS_DIR = PROJECT_ROOT / "data" / "aptos2019" / "extracted"
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 CLASS_NAMES = ["No apparent DR", "Mild DR", "Moderate DR", "Severe DR", "Proliferative DR"]
-IMAGE_SIZE = 224
+IMAGE_SIZE = 384
 NORMALIZATION = {
     "mean": [0.485, 0.456, 0.406],
     "std": [0.229, 0.224, 0.225],
@@ -67,9 +68,10 @@ class FundusDataset(Dataset[tuple[Tensor, int]]):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--dataset", choices=["auto", "aptos", "idrid"], default="auto", help="Dataset to train on")
+    parser.add_argument("--epochs", type=int, default=35)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--learning-rate", type=float, default=2.5e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--validation-fraction", type=float, default=0.2)
     parser.add_argument("--workers", type=int, default=0, help="0 is most reliable on Windows")
@@ -97,7 +99,37 @@ def resolve_device(requested: str) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def load_samples() -> tuple[list[Sample], list[Sample]]:
+def load_aptos_samples() -> tuple[list[Sample], list[Sample], list[Sample]]:
+    """Load APTOS 2019 dataset pre-split into train (2930), validation (366), and test (366) sets."""
+    train_dir = APTOS_DIR / "train_images" / "train_images"
+    val_dir = APTOS_DIR / "val_images" / "val_images"
+    test_dir = APTOS_DIR / "test_images" / "test_images"
+
+    def read_csv_samples(csv_path: Path, img_dir: Path) -> list[Sample]:
+        samples: list[Sample] = []
+        if not csv_path.is_file():
+            return samples
+        with csv_path.open(newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                image_id = (row.get("id_code") or "").strip()
+                grade_text = (row.get("diagnosis") or "").strip()
+                if not image_id or grade_text not in {"0", "1", "2", "3", "4"}:
+                    continue
+                img_path = img_dir / f"{image_id}.png"
+                if not img_path.is_file():
+                    img_path = img_dir / f"{image_id}.jpg"
+                if not img_path.is_file():
+                    continue
+                samples.append(Sample(image_path=img_path, grade=int(grade_text)))
+        return samples
+
+    train_samples = read_csv_samples(APTOS_DIR / "train_1.csv", train_dir)
+    val_samples = read_csv_samples(APTOS_DIR / "valid.csv", val_dir)
+    test_samples = read_csv_samples(APTOS_DIR / "test.csv", test_dir)
+    return train_samples, val_samples, test_samples
+
+
+def load_idrid_samples() -> tuple[list[Sample], list[Sample]]:
     if not DATASET_DIR.is_dir() or not LABELS_PATH.is_file():
         raise FileNotFoundError("Expected archive/Imagenes/Imagenes and archive/idrid_labels.csv in the project root.")
 
@@ -120,14 +152,30 @@ def load_samples() -> tuple[list[Sample], list[Sample]]:
     return train_samples, test_samples
 
 
+def load_samples(dataset_choice: str = "auto") -> tuple[list[Sample], list[Sample], list[Sample]]:
+    if dataset_choice in {"auto", "aptos"} and (APTOS_DIR / "train_1.csv").is_file():
+        return load_aptos_samples()
+    train_samples, test_samples = load_idrid_samples()
+    # Split IDRiD training samples into train / val
+    train_indices, val_indices = train_test_split(
+        np.arange(len(train_samples)),
+        test_size=0.2,
+        random_state=42,
+        stratify=[sample.grade for sample in train_samples],
+    )
+    return [train_samples[i] for i in train_indices], [train_samples[i] for i in val_indices], test_samples
+
+
+
 def make_transforms() -> tuple[v2.Compose, v2.Compose]:
     normalize = v2.Normalize(mean=NORMALIZATION["mean"], std=NORMALIZATION["std"])
     train_transform = v2.Compose([
         v2.ToImage(),
         v2.Resize((IMAGE_SIZE, IMAGE_SIZE), antialias=True),
         v2.RandomHorizontalFlip(),
-        v2.RandomRotation(12),
-        v2.ColorJitter(brightness=0.12, contrast=0.12, saturation=0.06, hue=0.02),
+        v2.RandomVerticalFlip(),
+        v2.RandomRotation(180),
+        v2.ColorJitter(brightness=0.18, contrast=0.18, saturation=0.10, hue=0.04),
         v2.ToDtype(torch.float32, scale=True),
         normalize,
     ])
@@ -145,7 +193,7 @@ def build_model(pretrained: bool) -> nn.Module:
     model = efficientnet_b0(weights=weights)
     in_features = model.classifier[1].in_features
     model.classifier[1] = nn.Sequential(
-        nn.Dropout(p=0.3),
+        nn.Dropout(p=0.35),
         nn.Linear(in_features, len(CLASS_NAMES)),
     )
     return model
@@ -171,9 +219,17 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> tupl
 
 def class_weights(samples: Iterable[Sample]) -> Tensor:
     counts = np.bincount([sample.grade for sample in samples], minlength=len(CLASS_NAMES)).astype(np.float32)
-    # Mean-one inverse-frequency weights keep the loss scale stable across class imbalance.
     weights = counts.sum() / (len(CLASS_NAMES) * counts)
     return torch.tensor(weights, dtype=torch.float32)
+
+
+def ordinal_loss(logits: Tensor, targets: Tensor, weights: Tensor) -> Tensor:
+    ce = nn.functional.cross_entropy(logits, targets, weight=weights, label_smoothing=0.05)
+    probs = nn.functional.softmax(logits, dim=1)
+    class_vals = torch.tensor([0.0, 1.0, 2.0, 3.0, 4.0], device=logits.device)
+    expected_val = (probs * class_vals).sum(dim=1)
+    mse = nn.functional.mse_loss(expected_val, targets.float())
+    return ce + 0.75 * mse
 
 
 def make_checkpoint(model: nn.Module, args: argparse.Namespace, metrics: dict[str, float]) -> dict[str, object]:
@@ -198,27 +254,25 @@ def make_checkpoint(model: nn.Module, args: argparse.Namespace, metrics: dict[st
 
 def main() -> None:
     args = parse_args()
-    if args.epochs < 1 or args.batch_size < 1 or not 0 < args.validation_fraction < 0.5:
-        raise ValueError("epochs and batch-size must be positive; validation-fraction must be between 0 and 0.5.")
+    if args.epochs < 1 or args.batch_size < 1:
+        raise ValueError("epochs and batch-size must be positive.")
     set_seed(args.seed)
     device = resolve_device(args.device)
-    train_samples, test_samples = load_samples()
-    train_indices, validation_indices = train_test_split(
-        np.arange(len(train_samples)),
-        test_size=args.validation_fraction,
-        random_state=args.seed,
-        stratify=[sample.grade for sample in train_samples],
-    )
-    training_samples = [train_samples[index] for index in train_indices]
-    validation_samples = [train_samples[index] for index in validation_indices]
+    training_samples, validation_samples, test_samples = load_samples(args.dataset)
     train_transform, evaluation_transform = make_transforms()
     pin_memory = device.type == "cuda"
-    train_loader = DataLoader(FundusDataset(training_samples, train_transform), batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=pin_memory)
+
+    # Balanced WeightedRandomSampler
+    counts = np.bincount([sample.grade for sample in training_samples], minlength=len(CLASS_NAMES)).astype(np.float32)
+    sample_weights = torch.tensor([1.0 / counts[sample.grade] for sample in training_samples], dtype=torch.double)
+    sampler = torch.utils.data.WeightedRandomSampler(weights=sample_weights, num_samples=len(training_samples), replacement=True)
+
+    train_loader = DataLoader(FundusDataset(training_samples, train_transform), batch_size=args.batch_size, sampler=sampler, num_workers=args.workers, pin_memory=pin_memory)
     validation_loader = DataLoader(FundusDataset(validation_samples, evaluation_transform), batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=pin_memory)
     test_loader = DataLoader(FundusDataset(test_samples, evaluation_transform), batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=pin_memory)
 
     model = build_model(pretrained=not args.no_pretrained).to(device)
-    loss_fn = nn.CrossEntropyLoss(weight=class_weights(training_samples).to(device), label_smoothing=0.05)
+    weights_tensor = class_weights(training_samples).to(device)
     optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
@@ -228,7 +282,7 @@ def main() -> None:
     best_validation_kappa = float("-inf")
     best_epoch = 0
     started_at = time.perf_counter()
-    print(f"Training on {device}: {len(training_samples)} train / {len(validation_samples)} validation / {len(test_samples)} held-out test images")
+    print(f"Enhanced Training on {device} (IMAGE_SIZE={IMAGE_SIZE}): {len(training_samples)} train / {len(validation_samples)} val / {len(test_samples)} test images")
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -237,7 +291,7 @@ def main() -> None:
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast(device_type=device.type, enabled=device.type == "cuda"):
                 logits = model(images.to(device, non_blocking=True))
-                loss = loss_fn(logits, labels.to(device, non_blocking=True))
+                loss = ordinal_loss(logits, labels.to(device, non_blocking=True), weights_tensor)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -251,6 +305,7 @@ def main() -> None:
             best_validation_kappa = validation_metrics["quadratic_weighted_kappa"]
             best_epoch = epoch
             torch.save(make_checkpoint(model, args, validation_metrics), checkpoint_path)
+
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])

@@ -1,0 +1,91 @@
+{
+  "total_test_samples": 80,
+  "accuracy": 0.475,
+  "balanced_accuracy": 0.5667,
+  "macro_f1": 0.4643,
+  "quadratic_weighted_kappa": 0.6613,
+  "avg_latency_ms": 50.04,
+  "model_params_m": 4.01,
+  "checkpoint_size_mb": 15.6,
+  "confusion_matrix_5x5": [
+    [
+      7,
+      8,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      5,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      8,
+      10,
+      9,
+      2
+    ],
+    [
+      1,
+      1,
+      1,
+      12,
+      5
+    ],
+    [
+      1,
+      0,
+      2,
+      2,
+      4
+    ]
+  ],
+  "per_class": {
+    "No apparent DR": {
+      "precision": 0.6364,
+      "recall_sensitivity": 0.4667,
+      "f1_score": 0.5385,
+      "support": 15
+    },
+    "Mild DR": {
+      "precision": 0.2273,
+      "recall_sensitivity": 1.0,
+      "f1_score": 0.3704,
+      "support": 5
+    },
+    "Moderate DR": {
+      "precision": 0.7692,
+      "recall_sensitivity": 0.3226,
+      "f1_score": 0.4545,
+      "support": 31
+    },
+    "Severe DR": {
+      "precision": 0.5217,
+      "recall_sensitivity": 0.6,
+      "f1_score": 0.5581,
+      "support": 20
+    },
+    "Proliferative DR": {
+      "precision": 0.3636,
+      "recall_sensitivity": 0.4444,
+      "f1_score": 0.4,
+      "support": 9
+    }
+  },
+  "referral_triage": {
+    "sensitivity": 0.7833,
+    "specificity": 1.0,
+    "ppv": 1.0,
+    "npv": 0.6061,
+    "matrix": {
+      "TN": 20,
+      "FP": 0,
+      "FN": 13,
+      "TP": 47
+    }
+  }
+}
