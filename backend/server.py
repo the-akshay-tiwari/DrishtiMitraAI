@@ -44,38 +44,19 @@ class_names: list[str] = []
 transform: v2.Compose | None = None
 
 
-def generate_gradcam(target_model: torch.nn.Module, image_tensor: torch.Tensor, target_class: int) -> str:
-    h1 = None
-    h2 = None
+def generate_cam(target_model: torch.nn.Module, feat: torch.Tensor, target_class: int) -> str:
     try:
-        target_layer = target_model.features[-1]
-        features: list[torch.Tensor] = []
-        gradients: list[torch.Tensor] = []
+        linear_layer: torch.nn.Linear | None = None
+        for module in reversed(list(target_model.modules())):
+            if isinstance(module, torch.nn.Linear):
+                linear_layer = module
+                break
 
-        def forward_hook(module, input, output):
-            features.append(output)
-
-        def backward_hook(module, grad_in, grad_out):
-            gradients.append(grad_out[0])
-
-        h1 = target_layer.register_forward_hook(forward_hook)
-        h2 = target_layer.register_full_backward_hook(backward_hook)
-
-        input_tensor = image_tensor.clone().detach().requires_grad_(True)
-        target_model.zero_grad()
-
-        with torch.enable_grad():
-            logits = target_model(input_tensor)
-            score = logits[0, target_class]
-            score.backward()
-
-        if not features or not gradients:
+        if linear_layer is None or linear_layer.weight is None:
             return ""
 
-        feat = features[0]
-        grad = gradients[0]
-        weights = grad.mean(dim=(2, 3), keepdim=True)
-        cam = (weights * feat).sum(dim=1, keepdim=True)
+        class_weights = linear_layer.weight[target_class].view(1, -1, 1, 1)
+        cam = (class_weights * feat).sum(dim=1, keepdim=True)
         cam = F.relu(cam)
         cam = F.interpolate(cam, size=(224, 224), mode="bilinear", align_corners=False)
 
@@ -83,9 +64,9 @@ def generate_gradcam(target_model: torch.nn.Module, image_tensor: torch.Tensor, 
         if cam_max > cam_min:
             cam = (cam - cam_min) / (cam_max - cam_min)
 
-        cam_np = (cam.squeeze().cpu().detach().numpy() * 255).astype(np.uint8)
-        h, w = cam_np.shape
-        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        cam_np = (cam.squeeze().cpu().numpy() * 255).astype(np.uint8)
+        h_dim, w_dim = cam_np.shape
+        rgba = np.zeros((h_dim, w_dim, 4), dtype=np.uint8)
         rgba[:, :, 0] = np.clip(cam_np * 1.5, 0, 255).astype(np.uint8)
         rgba[:, :, 1] = np.clip((255 - np.abs(cam_np.astype(np.float32) - 128) * 2), 0, 255).astype(np.uint8)
         rgba[:, :, 2] = np.clip((255 - cam_np.astype(np.float32) * 1.5), 0, 255).astype(np.uint8)
@@ -97,14 +78,8 @@ def generate_gradcam(target_model: torch.nn.Module, image_tensor: torch.Tensor, 
         b64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
         return f"data:image/png;base64,{b64_str}"
     except Exception as exc:
-        print(f"Warning: GradCAM generation skipped due to error: {exc}")
+        print(f"Warning: CAM generation skipped due to error: {exc}")
         return ""
-    finally:
-        if h1 is not None:
-            h1.remove()
-        if h2 is not None:
-            h2.remove()
-        target_model.zero_grad()
 
 
 def load_model() -> None:
@@ -147,7 +122,7 @@ def health() -> dict[str, object]:
 async def predict(image: UploadFile = File(...)) -> dict[str, object]:
     if model is None or transform is None:
         raise HTTPException(status_code=503, detail="No trained model found. Run backend/train.py first.")
-    
+
     content_type = (image.content_type or "").lower()
     if content_type and not (content_type.startswith("image/") or content_type == "application/octet-stream"):
         raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP fundus image.")
@@ -164,6 +139,13 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
     except (UnidentifiedImageError, OSError) as error:
         raise HTTPException(status_code=400, detail="The uploaded file is not a valid image.") from error
 
+    features: list[torch.Tensor] = []
+    def forward_hook(module, input, output):
+        features.append(output)
+
+    target_layer = model.features[-1]
+    hook_handle = target_layer.register_forward_hook(forward_hook)
+
     try:
         image_tensor = transform(rgb_image).unsqueeze(0).to(DEVICE)
         with torch.inference_mode():
@@ -171,12 +153,17 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
             probabilities = torch.softmax(logits, dim=1)[0].cpu().tolist()
         grade = int(max(range(len(probabilities)), key=probabilities.__getitem__))
     except Exception as error:
+        print(f"Error during model prediction: {error}")
         raise HTTPException(status_code=500, detail=f"Inference computation error: {error}") from error
+    finally:
+        hook_handle.remove()
 
+    heatmap_b64 = ""
     try:
-        heatmap_b64 = generate_gradcam(model, image_tensor, grade)
-    except Exception:
-        heatmap_b64 = ""
+        if features:
+            heatmap_b64 = generate_cam(model, features[0], grade)
+    except Exception as exc:
+        print(f"Warning: Heatmap generation failed: {exc}")
 
     return {
         "grade": grade,
