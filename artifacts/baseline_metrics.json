@@ -1,0 +1,17 @@
+{
+  "model": "EfficientNet-B0 ImageNet transfer learning",
+  "dataset": "APTOS 2019 Blindness Detection Dataset",
+  "best_epoch": 29,
+  "validation_metrics": {
+    "accuracy": 0.860655737704918,
+    "balanced_accuracy": 0.7626833631484795,
+    "macro_f1": 0.7517896573879559,
+    "quadratic_weighted_kappa": 0.9142622255224355
+  },
+  "held_out_test_metrics": {
+    "accuracy": 0.8360655737704918,
+    "balanced_accuracy": 0.6989364426163023,
+    "macro_f1": 0.6877849623599582,
+    "quadratic_weighted_kappa": 0.9091191750119836
+  }
+}

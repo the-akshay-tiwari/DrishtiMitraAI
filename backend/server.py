@@ -11,6 +11,8 @@ import torch
 import torch.nn.functional as F
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from torchvision.models import efficientnet_b0
 from torchvision.transforms import v2
@@ -18,14 +20,16 @@ from torchvision.transforms import v2
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_PATH = PROJECT_ROOT / "artifacts" / "drishtimitra_efficientnet_b0.pt"
+DIST_DIR = PROJECT_ROOT / "dist"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 
 app = FastAPI(title="DrishtiMitra experimental inference API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["GET", "POST"],
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -110,6 +114,9 @@ def load_model() -> None:
 @app.on_event("startup")
 def startup() -> None:
     load_model()
+    assets_dir = DIST_DIR / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
 
 @app.get("/health")
@@ -149,4 +156,26 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
         "heatmap": heatmap_b64,
         "medical_disclaimer": "Experimental research output only. A qualified ophthalmologist must make the clinical decision.",
     }
+
+
+# Mount compiled React assets and SPA fallback
+@app.get("/{full_path:path}")
+async def serve_spa(full_path: str):
+    if full_path in {"health", "predict"} or full_path.startswith("assets/"):
+        raise HTTPException(status_code=404, detail="Not found")
+    target_file = DIST_DIR / full_path
+    if target_file.is_file():
+        return FileResponse(target_file)
+    index_file = DIST_DIR / "index.html"
+    if index_file.is_file():
+        return FileResponse(index_file)
+    return {"message": "DrishtiMitra Inference API active. Run 'npm run build' to serve frontend."}
+
+
+@app.on_event("startup")
+def mount_static_assets() -> None:
+    assets_dir = DIST_DIR / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
 

@@ -115,7 +115,8 @@ function App() {
     try {
       const body = new FormData()
       body.append('image', uploadedFile)
-      const response = await fetch('http://127.0.0.1:8000/predict', { method: 'POST', body })
+      const apiBase = import.meta.env.VITE_API_BASE_URL || ''
+      const response = await fetch(`${apiBase}/predict`, { method: 'POST', body })
       const result = await response.json() as { detail?: unknown; grade?: unknown; confidence?: unknown; probabilities?: unknown; heatmap?: string }
       if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'The local inference service could not process this image.')
       if (typeof result.grade !== 'number' || !Number.isInteger(result.grade) || result.grade < 0 || result.grade > 4 || typeof result.confidence !== 'number' || typeof result.probabilities !== 'object' || result.probabilities === null) {

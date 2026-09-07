@@ -1,0 +1,42 @@
+{
+  "validation_ordinal_stats": {
+    "total_samples": 366,
+    "exact_prediction_rate": 0.8607,
+    "within_1_grade_accuracy": 0.9699,
+    "errors_greater_than_1_grade": 0.0301,
+    "grade_difference_counts": {
+      "0": 315,
+      "1": 40,
+      "2": 8,
+      "3": 2,
+      "4": 1
+    }
+  },
+  "test_ordinal_stats": {
+    "total_samples": 366,
+    "exact_prediction_rate": 0.8361,
+    "within_1_grade_accuracy": 0.959,
+    "errors_greater_than_1_grade": 0.041,
+    "grade_difference_counts": {
+      "0": 306,
+      "1": 45,
+      "2": 13,
+      "3": 2
+    }
+  },
+  "prediction_distribution_test": {
+    "0": 196,
+    "1": 37,
+    "2": 84,
+    "3": 21,
+    "4": 28
+  },
+  "true_label_distribution_test": {
+    "0": 199,
+    "1": 30,
+    "2": 87,
+    "3": 17,
+    "4": 33
+  },
+  "total_misclassified_test_samples": 60
+}
