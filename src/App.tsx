@@ -117,11 +117,26 @@ function App() {
       body.append('image', uploadedFile)
       const apiBase = import.meta.env.VITE_API_BASE_URL || ''
       const response = await fetch(`${apiBase}/predict`, { method: 'POST', body })
-      const result = await response.json() as { detail?: unknown; grade?: unknown; confidence?: unknown; probabilities?: unknown; heatmap?: string }
-      if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'The local inference service could not process this image.')
-      if (typeof result.grade !== 'number' || !Number.isInteger(result.grade) || result.grade < 0 || result.grade > 4 || typeof result.confidence !== 'number' || typeof result.probabilities !== 'object' || result.probabilities === null) {
-        throw new Error('The local inference service returned an invalid prediction.')
+      
+      const rawText = await response.text()
+      let result: { detail?: unknown; grade?: unknown; confidence?: unknown; probabilities?: unknown; heatmap?: string } = {}
+      if (rawText) {
+        try {
+          result = JSON.parse(rawText)
+        } catch {
+          // Response body was not valid JSON (e.g. HTML error page or proxy error)
+        }
       }
+
+      if (!response.ok) {
+        const detailMsg = typeof result.detail === 'string' ? result.detail : `Server error (${response.status} ${response.statusText || 'Inference failed'}). Please try again.`
+        throw new Error(detailMsg)
+      }
+
+      if (typeof result.grade !== 'number' || !Number.isInteger(result.grade) || result.grade < 0 || result.grade > 4 || typeof result.confidence !== 'number' || typeof result.probabilities !== 'object' || result.probabilities === null) {
+        throw new Error('The inference service returned an invalid prediction structure.')
+      }
+
       setSelectedGrade(result.grade as Grade)
       setPrediction({
         confidence: result.confidence,
@@ -132,7 +147,7 @@ function App() {
     } catch (error) {
       setAnalysisComplete(false)
       setPrediction(null)
-      setAnalysisError(error instanceof Error ? error.message : 'Unable to contact the local inference service.')
+      setAnalysisError(error instanceof Error ? error.message : 'Unable to contact the inference service.')
     } finally {
       setIsAnalyzing(false)
     }

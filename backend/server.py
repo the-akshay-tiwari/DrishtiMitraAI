@@ -45,55 +45,66 @@ transform: v2.Compose | None = None
 
 
 def generate_gradcam(target_model: torch.nn.Module, image_tensor: torch.Tensor, target_class: int) -> str:
-    target_layer = target_model.features[-1]
-    features: list[torch.Tensor] = []
-    gradients: list[torch.Tensor] = []
+    h1 = None
+    h2 = None
+    try:
+        target_layer = target_model.features[-1]
+        features: list[torch.Tensor] = []
+        gradients: list[torch.Tensor] = []
 
-    def forward_hook(module, input, output):
-        features.append(output)
+        def forward_hook(module, input, output):
+            features.append(output)
 
-    def backward_hook(module, grad_in, grad_out):
-        gradients.append(grad_out[0])
+        def backward_hook(module, grad_in, grad_out):
+            gradients.append(grad_out[0])
 
-    h1 = target_layer.register_forward_hook(forward_hook)
-    h2 = target_layer.register_full_backward_hook(backward_hook)
+        h1 = target_layer.register_forward_hook(forward_hook)
+        h2 = target_layer.register_full_backward_hook(backward_hook)
 
-    input_tensor = image_tensor.clone().detach().requires_grad_(True)
-    target_model.zero_grad()
-    logits = target_model(input_tensor)
-    score = logits[0, target_class]
-    score.backward()
+        input_tensor = image_tensor.clone().detach().requires_grad_(True)
+        target_model.zero_grad()
 
-    h1.remove()
-    h2.remove()
+        with torch.enable_grad():
+            logits = target_model(input_tensor)
+            score = logits[0, target_class]
+            score.backward()
 
-    if not features or not gradients:
+        if not features or not gradients:
+            return ""
+
+        feat = features[0]
+        grad = gradients[0]
+        weights = grad.mean(dim=(2, 3), keepdim=True)
+        cam = (weights * feat).sum(dim=1, keepdim=True)
+        cam = F.relu(cam)
+        cam = F.interpolate(cam, size=(224, 224), mode="bilinear", align_corners=False)
+
+        cam_min, cam_max = cam.min(), cam.max()
+        if cam_max > cam_min:
+            cam = (cam - cam_min) / (cam_max - cam_min)
+
+        cam_np = (cam.squeeze().cpu().detach().numpy() * 255).astype(np.uint8)
+        h, w = cam_np.shape
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[:, :, 0] = np.clip(cam_np * 1.5, 0, 255).astype(np.uint8)
+        rgba[:, :, 1] = np.clip((255 - np.abs(cam_np.astype(np.float32) - 128) * 2), 0, 255).astype(np.uint8)
+        rgba[:, :, 2] = np.clip((255 - cam_np.astype(np.float32) * 1.5), 0, 255).astype(np.uint8)
+        rgba[:, :, 3] = np.clip(cam_np.astype(np.float32) * 0.85, 0, 215).astype(np.uint8)
+
+        overlay_img = Image.fromarray(rgba, mode="RGBA")
+        buffer = io.BytesIO()
+        overlay_img.save(buffer, format="PNG")
+        b64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        return f"data:image/png;base64,{b64_str}"
+    except Exception as exc:
+        print(f"Warning: GradCAM generation skipped due to error: {exc}")
         return ""
-
-    feat = features[0]
-    grad = gradients[0]
-    weights = grad.mean(dim=(2, 3), keepdim=True)
-    cam = (weights * feat).sum(dim=1, keepdim=True)
-    cam = F.relu(cam)
-    cam = F.interpolate(cam, size=(224, 224), mode="bilinear", align_corners=False)
-
-    cam_min, cam_max = cam.min(), cam.max()
-    if cam_max > cam_min:
-        cam = (cam - cam_min) / (cam_max - cam_min)
-
-    cam_np = (cam.squeeze().cpu().detach().numpy() * 255).astype(np.uint8)
-    h, w = cam_np.shape
-    rgba = np.zeros((h, w, 4), dtype=np.uint8)
-    rgba[:, :, 0] = np.clip(cam_np * 1.5, 0, 255).astype(np.uint8)
-    rgba[:, :, 1] = np.clip((255 - np.abs(cam_np.astype(np.float32) - 128) * 2), 0, 255).astype(np.uint8)
-    rgba[:, :, 2] = np.clip((255 - cam_np.astype(np.float32) * 1.5), 0, 255).astype(np.uint8)
-    rgba[:, :, 3] = np.clip(cam_np.astype(np.float32) * 0.85, 0, 215).astype(np.uint8)
-
-    overlay_img = Image.fromarray(rgba, mode="RGBA")
-    buffer = io.BytesIO()
-    overlay_img.save(buffer, format="PNG")
-    b64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
-    return f"data:image/png;base64,{b64_str}"
+    finally:
+        if h1 is not None:
+            h1.remove()
+        if h2 is not None:
+            h2.remove()
+        target_model.zero_grad()
 
 
 def load_model() -> None:
@@ -136,21 +147,37 @@ def health() -> dict[str, object]:
 async def predict(image: UploadFile = File(...)) -> dict[str, object]:
     if model is None or transform is None:
         raise HTTPException(status_code=503, detail="No trained model found. Run backend/train.py first.")
-    if image.content_type not in {"image/jpeg", "image/png", "image/webp"}:
+    
+    content_type = (image.content_type or "").lower()
+    if content_type and not (content_type.startswith("image/") or content_type == "application/octet-stream"):
         raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP fundus image.")
+
     contents = await image.read(MAX_IMAGE_BYTES + 1)
     if len(contents) > MAX_IMAGE_BYTES:
         raise HTTPException(status_code=413, detail="Image exceeds the 12 MB limit.")
+    if len(contents) == 0:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+
     try:
         with Image.open(io.BytesIO(contents)) as uploaded:
             rgb_image = uploaded.convert("RGB")
     except (UnidentifiedImageError, OSError) as error:
         raise HTTPException(status_code=400, detail="The uploaded file is not a valid image.") from error
-    image_tensor = transform(rgb_image).unsqueeze(0).to(DEVICE)
-    with torch.inference_mode():
-        probabilities = torch.softmax(model(image_tensor), dim=1)[0].cpu().tolist()
-    grade = int(max(range(len(probabilities)), key=probabilities.__getitem__))
-    heatmap_b64 = generate_gradcam(model, image_tensor, grade)
+
+    try:
+        image_tensor = transform(rgb_image).unsqueeze(0).to(DEVICE)
+        with torch.inference_mode():
+            logits = model(image_tensor)
+            probabilities = torch.softmax(logits, dim=1)[0].cpu().tolist()
+        grade = int(max(range(len(probabilities)), key=probabilities.__getitem__))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Inference computation error: {error}") from error
+
+    try:
+        heatmap_b64 = generate_gradcam(model, image_tensor, grade)
+    except Exception:
+        heatmap_b64 = ""
+
     return {
         "grade": grade,
         "label": class_names[grade],
