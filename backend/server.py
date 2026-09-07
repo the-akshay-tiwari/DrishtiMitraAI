@@ -44,6 +44,65 @@ class_names: list[str] = []
 transform: v2.Compose | None = None
 
 
+def pad_to_square(image: Image.Image, bg_color: tuple[int, int, int] = (0, 0, 0)) -> Image.Image:
+    """Pad image with black borders to make it 1:1 square without distorting aspect ratio."""
+    width, height = image.size
+    if width == height:
+        return image
+    max_dim = max(width, height)
+    new_img = Image.new(image.mode, (max_dim, max_dim), bg_color)
+    paste_x = (max_dim - width) // 2
+    paste_y = (max_dim - height) // 2
+    new_img.paste(image, (paste_x, paste_y))
+    return new_img
+
+
+def validate_retina_image(image: Image.Image) -> tuple[bool, str]:
+    """Validate whether an image is a valid, clear fundus retina image."""
+    img_np = np.array(image.convert("RGB"))
+    h, w, _ = img_np.shape
+
+    if h < 64 or w < 64:
+        return False, "Image resolution is too low. Please upload a clear fundus image."
+
+    mean_intensity = float(np.mean(img_np))
+    if mean_intensity < 10.0:
+        return False, "Uploaded image is too dark or empty. Please upload an illuminated fundus retina image."
+    if mean_intensity > 240.0:
+        return False, "Uploaded image is overexposed. Please upload a clear fundus retina image."
+
+    r_mean = float(np.mean(img_np[:, :, 0]))
+    g_mean = float(np.mean(img_np[:, :, 1]))
+    b_mean = float(np.mean(img_np[:, :, 2]))
+
+    # In fundus retina images, Red channel dominates over Blue channel (R > B)
+    if r_mean < b_mean * 1.05 and r_mean < 40.0:
+        return False, "The uploaded image does not appear to be a retinal fundus image. Please upload a valid retina scan."
+
+    # Center crop check (retina circular field)
+    center_h_start, center_h_end = int(h * 0.2), int(h * 0.8)
+    center_w_start, center_w_end = int(w * 0.2), int(w * 0.8)
+    center_crop = img_np[center_h_start:center_h_end, center_w_start:center_w_end]
+
+    center_r = float(np.mean(center_crop[:, :, 0]))
+    center_b = float(np.mean(center_crop[:, :, 2]))
+
+    if center_r < center_b * 1.08 and center_r < 35.0:
+        return False, "The image does not match the color profile of a retinal fundus scan. Please upload a valid retina image."
+
+    # Blur / Quality Check using discrete Laplacian variance
+    gray = np.mean(img_np, axis=2).astype(np.float32)
+    if gray.shape[0] > 10 and gray.shape[1] > 10:
+        laplacian = (
+            gray[2:, 1:-1] + gray[:-2, 1:-1] + gray[1:-1, 2:] + gray[1:-1, :-2] - 4 * gray[1:-1, 1:-1]
+        )
+        blur_variance = float(np.var(laplacian))
+        if blur_variance < 5.0:
+            return False, "Image is too blurry or out of focus to perform diabetic retinopathy screening. Please upload a clearer capture."
+
+    return True, ""
+
+
 def generate_cam(target_model: torch.nn.Module, feat: torch.Tensor, target_class: int) -> str:
     try:
         linear_layer: torch.nn.Linear | None = None
@@ -139,6 +198,14 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
     except (UnidentifiedImageError, OSError) as error:
         raise HTTPException(status_code=400, detail="The uploaded file is not a valid image.") from error
 
+    # 1. Quality & Non-retina validation check
+    is_valid_retina, error_reason = validate_retina_image(rgb_image)
+    if not is_valid_retina:
+        raise HTTPException(status_code=400, detail=error_reason)
+
+    # 2. Aspect-ratio preserving square padding
+    padded_image = pad_to_square(rgb_image)
+
     features: list[torch.Tensor] = []
     def forward_hook(module, input, output):
         features.append(output)
@@ -147,7 +214,7 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
     hook_handle = target_layer.register_forward_hook(forward_hook)
 
     try:
-        image_tensor = transform(rgb_image).unsqueeze(0).to(DEVICE)
+        image_tensor = transform(padded_image).unsqueeze(0).to(DEVICE)
         with torch.inference_mode():
             logits = model(image_tensor)
             probabilities = torch.softmax(logits, dim=1)[0].cpu().tolist()
