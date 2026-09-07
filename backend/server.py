@@ -21,6 +21,9 @@ from torchvision.transforms import v2
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_PATH = PROJECT_ROOT / "artifacts" / "drishtimitra_efficientnet_b0.pt"
 DIST_DIR = PROJECT_ROOT / "dist"
+ASSETS_DIR = DIST_DIR / "assets"
+ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 
@@ -32,6 +35,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount static assets top-level BEFORE route definitions so /assets/* is handled by StaticFiles
+app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
 model: torch.nn.Module | None = None
 class_names: list[str] = []
@@ -114,9 +120,6 @@ def load_model() -> None:
 @app.on_event("startup")
 def startup() -> None:
     load_model()
-    assets_dir = DIST_DIR / "assets"
-    if assets_dir.is_dir():
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
 
 @app.get("/health")
@@ -161,7 +164,7 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
 # Mount compiled React assets and SPA fallback
 @app.get("/{full_path:path}")
 async def serve_spa(full_path: str):
-    if full_path in {"health", "predict"} or full_path.startswith("assets/"):
+    if full_path in {"health", "predict"}:
         raise HTTPException(status_code=404, detail="Not found")
     target_file = DIST_DIR / full_path
     if target_file.is_file():
@@ -171,11 +174,5 @@ async def serve_spa(full_path: str):
         return FileResponse(index_file)
     return {"message": "DrishtiMitra Inference API active. Run 'npm run build' to serve frontend."}
 
-
-@app.on_event("startup")
-def mount_static_assets() -> None:
-    assets_dir = DIST_DIR / "assets"
-    if assets_dir.is_dir():
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
 
