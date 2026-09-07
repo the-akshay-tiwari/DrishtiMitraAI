@@ -8,7 +8,7 @@ RUN npm install
 COPY . ./
 RUN npm run build
 
-# Stage 2: Python FastAPI inference server
+# Stage 2: Python FastAPI inference server (CPU Optimized)
 FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -16,7 +16,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install Python dependencies
+# Install lightweight CPU-only PyTorch wheel (~180MB instead of 3GB CUDA)
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# Install remaining Python backend dependencies
 COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 

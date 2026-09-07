@@ -4,8 +4,6 @@
 .venv
 .python312
 node_modules
-src
-public
 *.md
 *.log
 *.zip
